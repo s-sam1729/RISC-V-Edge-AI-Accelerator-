@@ -1,0 +1,24 @@
+`timescale 1ns / 1ps
+
+module input_bram #(
+    parameter DEPTH = 256, // 256 words = 1KB
+    parameter WIDTH = 32
+) (
+    input  wire clk,
+    input  wire we,
+    input  wire [7:0] waddr,
+    input  wire [WIDTH-1:0] wdata,
+    input  wire re,
+    input  wire [7:0] raddr,
+    output reg  [WIDTH-1:0] rdata
+);
+
+    (* ram_style = "block" *)
+    reg [WIDTH-1:0] ram [0:DEPTH-1];
+
+    always @(posedge clk) begin
+        if (we) ram[waddr] <= wdata;
+        if (re) rdata <= ram[raddr];
+    end
+
+endmodule
