@@ -1,28 +1,21 @@
 `timescale 1ns / 1ps
 
 module pe (
-    input  wire clk, 
-    input  wire rst,
-    input  wire signed [7:0]  a_in,   // Activation flows right
-    input  wire signed [7:0]  b_in,   // Weight flows down
-    input  wire signed [31:0] acc_in, // Accumulator flows down (typically)
-    
-    output reg  signed [7:0]  a_out,
-    output reg  signed [7:0]  b_out,
-    output reg  signed [31:0] acc_out
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        flush,
+    input  wire        w_load,
+    input  wire signed [7:0]  w_in,
+    input  wire signed [7:0]  a_in,
+    input  wire        a_valid,
+    output reg  signed [31:0] acc
 );
-
-    always @(posedge clk) begin
-        if (rst) begin
-            a_out   <= 8'd0;
-            b_out   <= 8'd0;
-            acc_out <= 32'd0;
-        end else begin
-            a_out   <= a_in;
-            b_out   <= b_in;
-            // The core DSP operation
-            acc_out <= acc_in + (a_in * b_in); 
+    reg signed [7:0] w_reg;
+    always @(posedge clk or posedge rst) begin
+        if (rst || flush) acc <= 0;
+        else begin
+            if (a_valid) acc <= acc + a_in * (w_load ? w_in : w_reg);
+            if (w_load)  w_reg <= w_in;
         end
     end
-
 endmodule
