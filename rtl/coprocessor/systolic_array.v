@@ -1,100 +1,100 @@
 `timescale 1ns / 1ps
 
 module systolic_array #(
-    parameter N_ROWS = 8,  // Number of neurons processing at once
-    parameter N_COLS = 8   // Number of vector elements processed at once
+    parameter ROWS = 8,
+    parameter COLS = 8
 )(
-    input  wire clk,
-    input  wire rst,
-    
-    // Flat packed inputs from BRAMs
-    input  wire [8*N_ROWS-1:0] vec_a, // Activations
-    input  wire [8*N_COLS-1:0] vec_b, // Weights
-    
-    // Flat packed outputs (bottom of the columns)
-    output wire [32*N_COLS-1:0] result_vector
+    input  wire        clk,
+    input  wire        rst,
+    input  wire        flush,
+    input  wire        a_valid,
+    input  wire [8*COLS-1:0] a_data,
+    input  wire        w_load,
+    input  wire [ROWS*8*COLS-1:0] w_data_packed,
+    input  wire [ROWS*32-1:0] bias_packed,
+    input  wire        relu_en,
+    output wire [ROWS*32-1:0] result_row_packed,
+    output reg         valid_out
 );
 
-    // -------------------------------------------------------------
-    // 1. Unpacking and Skewing (Delaying) Inputs
-    // -------------------------------------------------------------
-    // In a systolic array, row 'i' must be delayed by 'i' cycles.
-    // Col 'j' must be delayed by 'j' cycles.
+    wire [8*COLS-1:0] w_data [0:ROWS-1];
+    wire signed [31:0] bias [0:ROWS-1];
+    reg  signed [31:0] result_row [0:ROWS-1];
     
-    wire signed [7:0] a_skewed [0:N_ROWS-1];
-    wire signed [7:0] b_skewed [0:N_COLS-1];
-    
-    genvar i, j;
+    genvar g;
     generate
-        // Skew Activations (Rows)
-        for (i = 0; i < N_ROWS; i = i + 1) begin : A_SKEW
-            reg signed [7:0] a_delay [0:i]; 
-            integer d;
-            always @(posedge clk) begin
-                a_delay[0] <= $signed(vec_a[(i*8) +: 8]);
-                for (d = 1; d <= i; d = d + 1) begin
-                    a_delay[d] <= a_delay[d-1];
-                end
-            end
-            assign a_skewed[i] = (i == 0) ? $signed(vec_a[(i*8) +: 8]) : a_delay[i-1];
-        end
-        
-        // Skew Weights (Cols)
-        for (j = 0; j < N_COLS; j = j + 1) begin : B_SKEW
-            reg signed [7:0] b_delay [0:j];
-            integer d;
-            always @(posedge clk) begin
-                b_delay[0] <= $signed(vec_b[(j*8) +: 8]);
-                for (d = 1; d <= j; d = d + 1) begin
-                    b_delay[d] <= b_delay[d-1];
-                end
-            end
-            assign b_skewed[j] = (j == 0) ? $signed(vec_b[(j*8) +: 8]) : b_delay[j-1];
+        for (g=0; g<ROWS; g=g+1) begin : UNPACK_WB
+            assign w_data[g] = w_data_packed[g*8*COLS +: 8*COLS];
+            assign bias[g]   = $signed(bias_packed[g*32 +: 32]);
+            assign result_row_packed[g*32 +: 32] = result_row[g];
         end
     endgenerate
 
-    // -------------------------------------------------------------
-    // 2. The PE Grid Generation
-    // -------------------------------------------------------------
-    wire signed [7:0]  a_wire [0:N_ROWS-1][0:N_COLS];   // [row][col]
-    wire signed [7:0]  b_wire [0:N_ROWS][0:N_COLS-1];   // [row][col]
-    wire signed [31:0] acc_wire [0:N_ROWS][0:N_COLS-1]; // [row][col]
-
+    wire signed [7:0] a_in_unpacked [0:COLS-1];
+    genvar i, j;
     generate
-        for (i = 0; i < N_ROWS; i = i + 1) begin : ROW
-            // Map the skewed inputs to the edges of the grid
-            assign a_wire[i][0] = a_skewed[i];
-            
-            for (j = 0; j < N_COLS; j = j + 1) begin : COL
-                // Map the skewed weights and initial zero accumulators to the top
-                if (i == 0) begin
-                    assign b_wire[0][j] = b_skewed[j];
-                    assign acc_wire[0][j] = 32'd0;
-                end
+        for (i = 0; i < COLS; i = i + 1) begin : UNPACK_A
+            assign a_in_unpacked[i] = $signed(a_data[8*i +: 8]);
+        end
+    endgenerate
+
+    wire signed [31:0] pe_acc [0:ROWS-1][0:COLS-1];
+    
+    generate
+        for (i = 0; i < ROWS; i = i + 1) begin : ROW_GEN
+            for (j = 0; j < COLS; j = j + 1) begin : COL_GEN
+                wire signed [7:0] w_in = $signed(w_data[i][8*j +: 8]);
+                wire signed [7:0] a_in_current;
+                wire v_in_current;
+                
+                assign a_in_current = a_in_unpacked[j];
+                assign v_in_current = a_valid;
                 
                 pe u_pe (
-                    .clk    (clk),
-                    .rst    (rst),
-                    .a_in   (a_wire[i][j]),       // Comes from left
-                    .b_in   (b_wire[i][j]),       // Comes from top
-                    .acc_in (acc_wire[i][j]),     // Comes from top
-                    
-                    .a_out  (a_wire[i][j+1]),     // Goes right
-                    .b_out  (b_wire[i+1][j]),     // Goes down
-                    .acc_out(acc_wire[i+1][j])    // Goes down
+                    .clk(clk), .rst(rst), .flush(flush), .w_load(w_load),
+                    .w_in(w_in), .a_in(a_in_current), .a_valid(v_in_current), .acc(pe_acc[i][j])
                 );
             end
         end
     endgenerate
 
-    // -------------------------------------------------------------
-    // 3. Packing the Output
-    // -------------------------------------------------------------
+    reg a_valid_q;
+    always @(posedge clk or posedge rst) begin
+        if (rst) a_valid_q <= 0;
+        else a_valid_q <= a_valid;
+    end
+
+    wire signed [31:0] row_sum [0:ROWS-1];
     generate
-        for (j = 0; j < N_COLS; j = j + 1) begin : PACK_OUT
-            // The final results emerge from the bottom of the array
-            assign result_vector[(j*32) +: 32] = acc_wire[N_ROWS][j];
+        for (i = 0; i < ROWS; i = i + 1) begin : SUM
+            reg signed [31:0] sum_tmp;
+            integer m;
+            always @(*) begin
+                sum_tmp = 0;
+                for (m = 0; m < COLS; m = m + 1) begin
+                    sum_tmp = sum_tmp + pe_acc[i][m];
+                end
+            end
+            assign row_sum[i] = sum_tmp;
         end
     endgenerate
 
+    integer k;
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            valid_out <= 0;
+            for (k = 0; k < ROWS; k = k + 1) result_row[k] <= 0;
+        end else begin
+            valid_out <= 0;
+            if (a_valid_q && !a_valid) begin
+                valid_out <= 1;
+                for (k = 0; k < ROWS; k = k + 1) begin
+                    if (relu_en && (row_sum[k] + bias[k] < 0))
+                        result_row[k] <= 0;
+                    else
+                        result_row[k] <= row_sum[k] + bias[k];
+                end
+            end
+        end
+    end
 endmodule
