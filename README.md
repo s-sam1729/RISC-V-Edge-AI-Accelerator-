@@ -8,9 +8,11 @@ A fully custom FPGA AI accelerator built from scratch: a 3-stage RV32I pipeline 
 
 Most edge ML deployments offload to an existing NPU or rely on a vendor-provided IP block. This project takes a different approach — every layer of the stack is custom, from the RISC-V pipeline itself down to the INT8 quantization scheme and the bare-metal C firmware.
 
-The core idea: dense matrix-vector multiplications dominate MLP inference, and a 2D systolic array can execute 64 MAC operations per clock cycle while a scalar CPU executes one. Coupling the two via MMIO lets the CPU act as a lightweight orchestrator — configuring the coprocessor, triggering inference, and reading results — while the systolic array does the heavy lifting.
+The core idea: dense matrix-vector multiplications dominate MLP inference, and a 2D systolic array can execute 64 MAC operations per clock cycle while a scalar CPU executes one. The FPGA fabric is what makes this practical — the 8×8 PE grid is instantiated as parallel hardware logic, so all 64 multiply-accumulate units operate simultaneously every clock cycle rather than being scheduled sequentially on a CPU core. Coupling the array to a soft-core RISC-V via MMIO lets the CPU act as a lightweight orchestrator — configuring the coprocessor, triggering inference, and reading results — while the FPGA does the heavy arithmetic.
 
-The result is end-to-end handwritten digit recognition: draw a digit in a Python GUI, send it over UART, and the FPGA classifies it in ~2.26 ms with 97.85% accuracy on MNIST.
+Input gets to the FPGA over UART: a Python host GUI sends 784 bytes representing a 28×28 pixel image at 115,200 baud, which the on-chip `uart_input_buffer` module frames into 32-bit words and writes directly into the input BRAM. Arrival of the 784th byte triggers hardware inference automatically — no CPU intervention needed for the transfer. From there, the coprocessor FSM takes over entirely, streaming weight tiles through the systolic array, applying fused ReLU and bias, rescaling between layers in hardware, and asserting `cop_done` when the ArgMax result is ready.
+
+The result is end-to-end handwritten digit recognition: draw a digit in the GUI, transmit over UART, and the FPGA classifies it in ~2.26 ms with 97.85% accuracy on MNIST — 113× faster than running the same MLP in C on the RISC-V core.
 
 ---
 
